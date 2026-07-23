@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node / dashboard build
+dashboard/node_modules/
+dashboard/dist/
+
+# Runtime data / local DB
+data/
+
+# Downloaded model weights (re-downloaded automatically on first run)
+yolov8n.pt
+models/*.task
+
+# Generated demo/tuning artifacts (re-creatable via scripts/)
+/demo_video.mp4
+/tune_real.csv
+/*.html
+
+# Session/tooling state, not project code
+.claude/

@@ -1,0 +1,128 @@
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: #000;
+}
+
+.tabs button {
+  background: #222;
+  color: #eee;
+  border: 1px solid #444;
+  padding: 0.3rem 0.8rem;
+  cursor: pointer;
+}
+
+.tabs button.active {
+  background: #3388ff;
+  border-color: #3388ff;
+}
+
+.tab-content {
+  flex: 1;
+  min-height: 0;
+}
+
+.app {
+  display: flex;
+  height: 100%;
+  width: 100%;
+}
+
+.map {
+  flex: 1;
+  height: 100%;
+}
+
+.alerts {
+  width: 320px;
+  padding: 1rem;
+  overflow-y: auto;
+  background: #111;
+  color: #eee;
+}
+
+.alerts ul {
+  list-style: none;
+  padding: 0;
+}
+
+.alerts li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #333;
+}
+
+.alerts input {
+  background: #222;
+  color: #eee;
+  border: 1px solid #444;
+}
+
+.alerts button {
+  margin-top: 0.3rem;
+  background: #3388ff;
+  color: #fff;
+  border: none;
+  padding: 0.2rem 0.6rem;
+  cursor: pointer;
+}
+
+.live-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+}
+
+.live-controls {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: #111;
+}
+
+.live-controls input {
+  background: #222;
+  color: #eee;
+  border: 1px solid #444;
+  padding: 0.2rem 0.4rem;
+}
+
+.live-controls button {
+  background: #3388ff;
+  color: #fff;
+  border: none;
+  padding: 0.2rem 0.8rem;
+  cursor: pointer;
+}
+
+.live-video-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.live-video-wrap video {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.live-video-wrap canvas {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 100%;
+  max-height: 100%;
+  cursor: crosshair;
+}

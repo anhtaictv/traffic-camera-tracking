@@ -1,0 +1,8 @@
+supervision<0.30
+ultralytics
+mediapipe
+easyocr
+insightface
+onnxruntime
+fastapi[standard]
+aiortc
