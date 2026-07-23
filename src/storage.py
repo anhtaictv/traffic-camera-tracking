@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 from .models import Track, VehicleInfo, DriverInfo, AccidentEvent
@@ -7,6 +8,14 @@ from .models import Track, VehicleInfo, DriverInfo, AccidentEvent
 # ponytail: sqlite tạm thay Postgres/PostGIS thật (chưa có hạ tầng DB ở Phase 0)
 # -> nâng cấp lên Postgres khi có server, giữ nguyên schema 2 bảng dưới.
 _DB_PATH = Path(__file__).resolve().parent.parent / "data" / "tracking.db"
+
+# Mở 1 connection dùng chung xuyên suốt process thay vì mở/đóng + chạy CREATE TABLE IF
+# NOT EXISTS + PRAGMA table_info (schema check) mỗi lần gọi save_track -> đo thực tế tốn
+# ~500ms/track, là bottleneck lớn nhất của pipeline. _connection_path cho phép test đổi
+# _DB_PATH giữa các test (DB riêng mỗi test) vẫn mở đúng connection mới.
+_connection: sqlite3.Connection | None = None
+_connection_path: Path | None = None
+_lock = threading.Lock()
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
@@ -18,8 +27,20 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: s
 
 
 def _get_connection() -> sqlite3.Connection:
+    global _connection, _connection_path
+    if _connection is not None and _connection_path == _DB_PATH:
+        return _connection
+    if _connection is not None:
+        _connection.close()
+
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH)
+    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    # ponytail: journal mode mặc định (rollback journal) fsync đĩa mỗi commit() -> đo thực
+    # tế 200 insert/commit mất 0.5s; WAL + synchronous=NORMAL cùng thao tác chỉ 0.008s (~65x).
+    # Đánh đổi: nếu mất điện/OS crash đúng lúc, vài transaction gần nhất có thể mất (DB không
+    # hỏng) -> chấp nhận được vì đây là dữ liệu track/telemetry, không phải giao dịch tài chính.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS suspect_tracks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,13 +75,15 @@ def _get_connection() -> sqlite3.Connection:
         )"""
     )
     conn.commit()
+    _connection = conn
+    _connection_path = _DB_PATH
     return conn
 
 
 def save_camera(camera_id: str, lat: float, lng: float, facing_deg: float, fov_deg: float) -> None:
     """Lưu/update vị trí GIS + góc nhìn 1 camera (bảng cameras)."""
     conn = _get_connection()
-    try:
+    with _lock:
         conn.execute(
             """INSERT INTO cameras (camera_id, lat, lng, facing_deg, fov_deg) VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(camera_id) DO UPDATE SET
@@ -68,17 +91,13 @@ def save_camera(camera_id: str, lat: float, lng: float, facing_deg: float, fov_d
             (camera_id, lat, lng, facing_deg, fov_deg),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def list_cameras() -> list[dict]:
     """Danh sách camera đã đăng ký (vị trí GIS + góc nhìn)."""
     conn = _get_connection()
-    try:
+    with _lock:
         rows = conn.execute("SELECT camera_id, lat, lng, facing_deg, fov_deg FROM cameras").fetchall()
-    finally:
-        conn.close()
     return [
         {"camera_id": r[0], "lat": r[1], "lng": r[2], "facing_deg": r[3], "fov_deg": r[4]} for r in rows
     ]
@@ -88,15 +107,13 @@ def save_track(track: Track) -> None:
     """Ghi/update track vào DB (bảng suspect_tracks)."""
     wx, wy = track.world_pos if track.world_pos else (None, None)
     conn = _get_connection()
-    try:
+    with _lock:
         conn.execute(
             "INSERT INTO suspect_tracks (track_id, camera_id, world_x, world_y, person_id, timestamp) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (track.track_id, track.camera_id, wx, wy, track.person_id, track.timestamp),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def find_person_sightings(person_id: int, camera_ids: list[str], since_timestamp: float) -> list[dict]:
@@ -105,15 +122,13 @@ def find_person_sightings(person_id: int, camera_ids: list[str], since_timestamp
         return []
     placeholders = ",".join("?" * len(camera_ids))
     conn = _get_connection()
-    try:
+    with _lock:
         rows = conn.execute(
             f"""SELECT track_id, camera_id, world_x, world_y, timestamp FROM suspect_tracks
                 WHERE person_id = ? AND camera_id IN ({placeholders}) AND timestamp >= ?
                 ORDER BY timestamp""",
             (person_id, *camera_ids, since_timestamp),
         ).fetchall()
-    finally:
-        conn.close()
     return [
         {"track_id": r[0], "camera_id": r[1], "world_x": r[2], "world_y": r[3], "timestamp": r[4]}
         for r in rows
@@ -123,14 +138,12 @@ def find_person_sightings(person_id: int, camera_ids: list[str], since_timestamp
 def find_person_track_history(person_id: int) -> list[dict]:
     """Toàn bộ track của 1 person_id, mọi camera, sắp theo thời gian (dùng để vẽ lộ trình)."""
     conn = _get_connection()
-    try:
+    with _lock:
         rows = conn.execute(
             """SELECT track_id, camera_id, world_x, world_y, timestamp FROM suspect_tracks
                WHERE person_id = ? ORDER BY timestamp""",
             (person_id,),
         ).fetchall()
-    finally:
-        conn.close()
     return [
         {"track_id": r[0], "camera_id": r[1], "world_x": r[2], "world_y": r[3], "timestamp": r[4]}
         for r in rows
@@ -140,7 +153,7 @@ def find_person_track_history(person_id: int) -> list[dict]:
 def save_event(event: AccidentEvent, vehicle: VehicleInfo, driver: DriverInfo) -> None:
     """Ghi sự kiện tai nạn + đặc điểm xe/người vào DB."""
     conn = _get_connection()
-    try:
+    with _lock:
         conn.execute(
             """INSERT INTO accident_events
                (camera_id, timestamp, track_ids, vehicle_plate, vehicle_color, vehicle_type,
@@ -158,5 +171,3 @@ def save_event(event: AccidentEvent, vehicle: VehicleInfo, driver: DriverInfo) -
             ),
         )
         conn.commit()
-    finally:
-        conn.close()

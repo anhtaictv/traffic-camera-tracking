@@ -3,12 +3,34 @@ from collections import deque
 
 import numpy as np
 import supervision as sv
+import torch
 from ultralytics import YOLO
 
 from .models import Frame, Detection, Track
 
 _TARGET_CLASSES = {"person", "car", "motorcycle", "bus", "truck"}
 _model: YOLO | None = None
+_device: str | None = None
+
+
+def _select_device() -> str:
+    """'cuda' nếu có GPU VÀ torch build hiện tại thực sự có kernel cho compute capability
+    của GPU đó, ngược lại 'cpu'. torch.cuda.is_available() có thể True nhưng vẫn crash khi
+    chạy (build mới bỏ hỗ trợ GPU đời cũ, vd Pascal như GTX 1080 bị cu130 bỏ) -> phải thử
+    chạy 1 phép tính nhỏ trên GPU thật để xác nhận, không chỉ tin is_available(). Máy khác
+    (RTX 5090, GPU AMD...) sẽ tự dùng đúng device khả dụng trên máy đó, không cần sửa code."""
+    global _device
+    if _device is not None:
+        return _device
+    if not torch.cuda.is_available():
+        _device = "cpu"
+        return _device
+    try:
+        (torch.zeros(1, device="cuda") + 1).cpu()
+        _device = "cuda"
+    except RuntimeError:
+        _device = "cpu"
+    return _device
 
 # ponytail: dùng time.time() làm mốc thời gian vì Track không mang timestamp
 # của frame nguồn -> chỉ đúng khi detect_accident được gọi gần-real-time ngay
@@ -81,7 +103,7 @@ def _get_model() -> YOLO:
 def detect_objects(frame: Frame) -> list[Detection]:
     """YOLO inference trên 1 frame -> detection thô (xe/người)."""
     model = _get_model()
-    result = model.predict(frame.image, verbose=False)[0]
+    result = model.predict(frame.image, verbose=False, device=_select_device())[0]
 
     detections = []
     for box in result.boxes:

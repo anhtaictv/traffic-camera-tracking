@@ -12,7 +12,8 @@ from ultralytics.utils import ASSETS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.webrtc_stream import build_answer
+from src.webrtc_stream import build_answer, CameraTrack
+from src.models import Frame, Track
 
 
 def _make_test_video(num_frames: int) -> str:
@@ -98,7 +99,32 @@ def test_webrtc_stream_saves_tracks_to_storage():
     assert mock_save_track.call_count % len(tracks) == 0
 
 
+def test_camera_track_skips_detect_using_frame_interval():
+    """detect_objects chỉ chạy thật mỗi _DETECT_INTERVAL frame (chia sẻ logic với
+    main.py qua _extrapolate_tracks) -> tránh giật hình do detect không kịp nhịp
+    phát ~30fps cố định của aiortc."""
+    frame = Frame(camera_id="cam_track_skip", timestamp=1.0, image=np.zeros((10, 10, 3), dtype=np.uint8))
+    track = Track(track_id=1, camera_id="cam_track_skip", bbox=(50.0, 50.0, 10, 10), class_id="car")
+
+    with (
+        patch("src.webrtc_stream.ingest.register_camera_source"),
+        patch("src.webrtc_stream.ingest.read_frame", return_value=frame),
+        patch("src.webrtc_stream.detection.detect_objects", return_value=[]) as mock_detect,
+        patch("src.webrtc_stream.tracking.update_tracks", return_value=[track]) as mock_update,
+        patch("src.webrtc_stream.tracking.predicted_velocity", return_value=(0.0, 0.0)),
+        patch("src.webrtc_stream.storage.save_track"),
+    ):
+        camera_track = CameraTrack("cam_track_skip", "dummy_source")
+        camera_track._process_frame()
+        camera_track._process_frame()
+        camera_track._process_frame()
+
+    assert mock_detect.call_count == 2  # frame_count 0 va 2 la frame detect that
+    assert mock_update.call_count == 2
+
+
 if __name__ == "__main__":
     test_webrtc_offer_answer_streams_video_and_metadata()
     test_webrtc_stream_saves_tracks_to_storage()
+    test_camera_track_skips_detect_using_frame_interval()
     print("OK")

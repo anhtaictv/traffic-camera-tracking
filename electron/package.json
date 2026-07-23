@@ -1,0 +1,33 @@
+{
+  "name": "app-addin-desktop",
+  "version": "1.0.0",
+  "description": "Desktop app cho App Add-in (traffic accident detection + tracking) tren Windows",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.addin.desktop",
+    "productName": "App Add-in",
+    "directories": {
+      "output": "dist_installer"
+    },
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

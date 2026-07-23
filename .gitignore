@@ -16,8 +16,12 @@ models/*.task
 
 # Generated demo/tuning artifacts (re-creatable via scripts/)
 /demo_video.mp4
+/video.mp4
 /tune_real.csv
 /*.html
+
+# Electron desktop app build output (rebuildable via npm run dist)
+electron/dist_installer/
 
 # Session/tooling state, not project code
 .claude/

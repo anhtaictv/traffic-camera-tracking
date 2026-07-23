@@ -6,3 +6,4 @@ insightface
 onnxruntime
 fastapi[standard]
 aiortc
+requests

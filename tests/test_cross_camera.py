@@ -30,9 +30,9 @@ def test_same_person_across_cameras_gets_same_global_id():
 
 
 def test_no_face_returns_none():
-    track = Track(track_id=1, camera_id="camA", bbox=(0, 0, 10, 10), class_id="person")
+    track = Track(track_id=2, camera_id="camNoFace", bbox=(0, 0, 10, 10), class_id="person")
     with patch("src.cross_camera.features.extract_face_embedding", return_value=None):
-        assert resolve_global_identity(track, _dummy_frame("camA")) is None
+        assert resolve_global_identity(track, _dummy_frame("camNoFace")) is None
 
 
 def test_world_pos_set_only_when_camera_calibrated():
@@ -85,10 +85,28 @@ def test_travel_bearing_prefers_kalman_velocity_over_history():
     assert abs(track.travel_bearing_deg - 0.0) < 1e-6
 
 
+def test_face_embedding_skipped_between_interval_but_person_id_and_embedding_reused():
+    from src.cross_camera import _FACE_EMBED_INTERVAL
+
+    embedding = [0.1, 0.2, 0.3]
+    with patch("src.cross_camera.features.extract_face_embedding", return_value=embedding) as mock_extract:
+        first_id = None
+        for i in range(_FACE_EMBED_INTERVAL):
+            track = Track(track_id=42, camera_id="camSkip", bbox=(0, 0, 10, 10), class_id="person")
+            person_id = resolve_global_identity(track, _dummy_frame("camSkip"))
+            if i == 0:
+                first_id = person_id
+            assert person_id == first_id  # cùng track_id -> vẫn ra cùng person_id kể cả khi skip
+            assert track.embedding == embedding  # embedding vẫn có mặt trên track dù không gọi lại extract
+
+        assert mock_extract.call_count == 1  # chỉ gọi extract_face_embedding ở frame đầu (count % interval == 0)
+
+
 if __name__ == "__main__":
     test_same_person_across_cameras_gets_same_global_id()
     test_no_face_returns_none()
     test_world_pos_set_only_when_camera_calibrated()
     test_travel_bearing_computed_from_consecutive_positions()
     test_travel_bearing_prefers_kalman_velocity_over_history()
+    test_face_embedding_skipped_between_interval_but_person_id_and_embedding_reused()
     print("OK")

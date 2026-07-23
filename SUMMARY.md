@@ -1,6 +1,6 @@
 # Tổng kết hệ thống — đã code những gì
 
-Hệ thống giám sát/theo dõi người & xe qua camera: phát hiện tai nạn, nhận diện đặc điểm xe/người, và theo dõi 1 người xuyên nhiều camera dựa trên vị trí GIS thật. Toàn bộ chạy trên CPU (không cần GPU), có test cho từng hàm.
+Hệ thống giám sát/theo dõi người & xe qua camera: phát hiện tai nạn, nhận diện đặc điểm xe/người, và theo dõi 1 người xuyên nhiều camera dựa trên vị trí GIS thật. Chạy được trên CPU, tự dùng GPU (NVIDIA/CUDA) nếu máy có — auto-detect, fallback CPU nếu không khớp. Có test cho từng hàm. Đóng gói được thành app Windows desktop (Electron, xem mục 8).
 
 ## 1. Pipeline lõi (1 camera)
 
@@ -55,7 +55,7 @@ Không cần dashboard/FastAPI, chỉ cần Python:
 
 - **sqlite tạm thay Postgres/PostGIS** — đủ dùng ở quy mô hiện tại, nâng cấp khi có hạ tầng DB thật.
 - **`WS /ws/events` poll DB mỗi 1s**, không phải pub/sub thật — đủ cho 1 dashboard, cần message queue khi nhiều client/camera.
-- **Inference (YOLO+InsightFace) chạy CPU mỗi frame** — không đạt tốc độ video thật (30fps) khi qua WebRTC, đủ để xem+chọn người chứ không phải giám sát tốc độ cao.
+- ~~Inference (YOLO+InsightFace) chạy CPU mỗi frame — không đạt tốc độ video thật~~ **đã tối ưu (2026-07-23)**: GPU auto-detect + frame-skip detection (chỉ YOLO thật mỗi 2 frame, nội suy Kalman ở giữa) + sửa bug DB (WAL + connection reuse) → ~58fps ổn định, vượt tốc độ video nguồn (30fps). Xem mục 8 và `report.md` mục 9 để biết chi tiết + giới hạn còn lại (chưa hỗ trợ GPU AMD, backend vẫn cần Python cài sẵn).
 - **`detect_accident` threshold (IOU>0.1, giảm tốc<30%) chưa tune bằng tai nạn thật** — có sẵn tool (`tune_accident_thresholds.py`) để làm việc này khi có video thật.
 - **`local_to_latlng` giả định gốc tọa độ local trùng vị trí GIS của camera** — đúng nếu calibration được set up theo quy ước này; cần biết khi thêm camera mới.
 - **`person_search.search_departed_person` chỉ query đúng lúc rời camera** — nếu các camera chạy độc lập, camera gần đó có thể chưa kịp ghi dữ liệu; chưa có cơ chế chờ/retry.
@@ -81,4 +81,17 @@ python scripts/tune_accident_thresholds.py video.mp4 --output tune.csv
 for f in tests/test_*.py; do python "$f"; done
 ```
 
-Chi tiết đầy đủ hơn (quyết định cần chốt, lịch sử thay đổi từng bước): xem `report.md`. Quy tắc code bắt buộc bám theo: xem `CLAUDE.md`.
+## 8. App Windows desktop (Electron) — `electron/`
+
+Đóng gói backend (FastAPI, tự serve luôn `dashboard/dist` đã build) + dashboard thành 1 app desktop thật, không cần mở terminal/browser thủ công:
+
+```bash
+cd dashboard && npm run build          # build dashboard -> dashboard/dist (chỉ cần lại khi sửa dashboard)
+cd electron && npm install             # 1 lần
+cd electron && npm start               # chạy dev (mở cửa sổ desktop ngay)
+cd electron && npm run dist            # đóng gói installer .exe (electron/dist_installer/App Add-in Setup 1.0.0.exe)
+```
+
+Đã verify: cài `/S` (silent) vào `C:\Program Files\App Add-in\`, có Start Menu shortcut, chạy đúng — tự spawn backend Python, mở cửa sổ load dashboard. Giới hạn: máy chạy app vẫn cần cài sẵn Python + dependency (`requirements.txt`) — không phải installer dependency-free.
+
+Chi tiết đầy đủ hơn (quyết định cần chốt, lịch sử thay đổi từng bước, các bug thật đã sửa): xem `report.md`. Quy tắc code bắt buộc bám theo: xem `CLAUDE.md`.

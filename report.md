@@ -121,3 +121,88 @@ Theo lựa chọn của bạn: demo bằng video file lặp lại + stream qua *
 **Giới hạn cố ý (ponytail):**
 - Inference (YOLO + InsightFace) chạy CPU mỗi frame → không đạt tốc độ video thật (30fps), có độ trễ vài trăm ms đến vài giây/frame tuỳ độ phân giải. Đủ dùng để xem+chọn người, không phải giám sát real-time tốc độ cao.
 - "Theo dõi" hiện chỉ là **highlight cùng person_id trong cùng 1 camera đang xem** + nút tra cứu thủ công sang camera khác — chưa tự động chuyển sang xem stream của camera khác khi người đó xuất hiện ở đó.
+
+## 8. Tích hợp sang Báo Tin (2026-07-23) — CHỈ phần phát hiện tai nạn + OCR biển số
+
+Anh yêu cầu đưa hệ thống này vào app cán bộ của dự án "Báo Tin" (`D:\App\BaoTin`) dưới dạng
+tab "Cảnh báo tai nạn giao thông". Đã từ chối phần nhận diện/theo dõi người xuyên camera
+(`reid.py`, `cross_camera.py`, `person_search.py`, `features.extract_face_embedding`) — đúng
+như cảnh báo pháp lý đã ghi ở `roadmap.md` mục 2 ("cần xác nhận cơ sở pháp lý... trước khi
+lưu trữ lâu dài"). Anh xác nhận đây là quyết định của anh trên dự án của anh và yêu cầu dừng
+tranh luận — ghi lại ở đây để phiên sau biết bối cảnh, không phải để tranh luận lại.
+
+Đã làm, CHỈ dùng `ingest.py` + `detection.py` + `features.extract_plate` (không đụng gì tới
+nhận diện người):
+- `scripts/traffic_accident_alert_worker.py` (mới): vòng lặp giống `main.py`'s `run_camera`
+  nhưng bỏ hết phần `cross_camera`/`storage`(sqlite)/`person_search`/pose height/face
+  embedding. Khi `detection.detect_accident()` = True (có cooldown 30s tránh spam), OCR biển
+  số các track class xe rồi `POST` tới `{backend_url}/detections/traffic-accidents` của
+  Báo Tin (multipart: `cameraId`, `plateNumbers`, `thumbnail` = 1 frame JPEG).
+- Test `tests/test_traffic_accident_alert_worker.py` — mock `features.extract_plate` +
+  `requests.post`, không cần chạy YOLO thật hay có backend thật đang chạy.
+- Thêm `requests` vào `requirements.txt` (chưa có, cần cho HTTP POST).
+- Phía Báo Tin: bảng `traffic_accident_alerts` mới (không đụng bảng `reports`/`cameras` cũ),
+  service/routes/tests riêng, tab mới trong `mobile-app-officer`. Chi tiết xem
+  `docs/NHATKY_2026-07-23.md` của Báo Tin (không phải file này).
+
+**Cách chạy demo:** `python scripts/traffic_accident_alert_worker.py <camera-id-thật> --video
+video.mp4 --backend-url https://baotin.work.gd/api --api-key <TRAFFIC_DETECTOR_API_KEY>` —
+dùng `video.mp4` mẫu có sẵn (lặp lại khi hết), không phải RTSP camera thật, đúng quy ước "demo
+dùng seed data" của Báo Tin.
+
+**Chưa làm / cần biết:**
+- Chưa chạy thật với `video.mp4` của repo này để xem `detect_accident()` có thật sự bắt được
+  gì trong đó không — threshold (`_COLLISION_IOU_THRESHOLD=0.75`) mới tune trên video giao
+  thông đông đúc khác (xem comment trong `detection.py`), chưa chắc đúng cho video này.
+- `--camera-id` phải là id thật trong bảng `cameras` của Báo Tin (lấy từ DB, ví dụ 1 trong 3
+  camera demo ở `seed-cameras.ts`) — chưa có cách tra cứu id này từ script, phải query DB
+  thủ công.
+
+## 9. Tối ưu tốc độ xử lý real-time + đóng gói app Windows (2026-07-23)
+
+Mục tiêu: pipeline gốc chỉ ~1.2 fps trên `video.mp4` (842 frame, nguồn 30fps) — không đạt
+real-time. Sau 1 phiên tối ưu liên tục đo-sửa-đo lại: **~58.5 fps ổn định** (không tính lúc
+có tai nạn), tức nhanh gấp **~49 lần**.
+
+**Bug thật bắt được (không phải chỉ đoán rồi sửa):**
+
+| # | Bug | Cách phát hiện | Sửa |
+|---|---|---|---|
+| 9 | `storage._get_connection()` có logic check cache ở đầu hàm nhưng **quên gán `_connection`/`_connection_path` trước khi return** → mỗi `save_track` vẫn mở connection mới + chạy lại `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` mỗi lần, y hệt bug gốc dù tưởng đã sửa | Benchmark trước/sau không khớp dự đoán toán học → thêm counter đếm số lần "tạo connection mới" mới lộ ra | Thêm 2 dòng gán còn thiếu |
+| 10 | SQLite mặc định fsync đĩa mỗi `commit()` (rollback journal mode) → mỗi track ghi tốn ~500ms | Benchmark tách riêng từng bước lộ ra `save_track` chiếm 60-87% thời gian | `PRAGMA journal_mode=WAL` + `synchronous=NORMAL` — nhanh hơn ~65 lần, chấp nhận rủi ro mất vài transaction cuối nếu mất điện đúng lúc (không hỏng DB) |
+| 11 | `cross_camera.resolve_global_identity` (face embedding InsightFace) chạy mỗi frame cho mọi track người, kể cả khi hoàn toàn không cần (video giao thông, không cần ghép person_id liên tục) | Benchmark tách bước lộ `resolve_identity` chiếm ~30% | `main.py`: chỉ gọi khi có tai nạn thật (`_handle_accident`), không phải mỗi frame. `cross_camera.py`: thêm rate-limit nội bộ (`_FACE_EMBED_INTERVAL=5`) cho chỗ vẫn cần liên tục (`webrtc_stream.py`, tính năng click-chọn-người) |
+| 12 | `webrtc_stream.py::CameraTrack.recv()` là `async def` nhưng thân hàm 100% đồng bộ (YOLO+tracking+DB+face embedding) → block toàn bộ event loop FastAPI mỗi frame, đo thực tế treo tới **585ms/frame** | Test đo độ trễ 1 coroutine `ticker()` chạy song song trong lúc `recv()` xử lý | Chuyển phần xử lý đồng bộ vào `asyncio.to_thread` — độ trễ tối đa còn **27ms** |
+| 13 | `webrtc_stream.py` chưa được áp frame-skip detection (chỉ `main.py` có) → live view giật hình vì detect không theo kịp nhịp phát ~30fps cố định của aiortc | User báo trực tiếp "giật hình, không thấy 50fps" | Áp cùng logic frame-skip (`_DETECT_INTERVAL`, `_extrapolate_tracks` dùng lại từ `main.py`) |
+| 14 | `torch` cài mặc định là bản CPU-only dù máy có GPU thật (GTX 1080) — sau khi cài lại bản CUDA đúng, gặp tiếp: bản `cu130` mới nhất **bỏ hỗ trợ kiến trúc Pascal** (GPU đời 2016), phải hạ xuống `cu126` | `torch.cuda.is_available()` không đủ tin — chạy thử 1 phép tính thật trên GPU mới lộ ra kernel không tồn tại cho compute capability đó | `detection.py::_select_device()` — không chỉ tin `is_available()`, thử chạy 1 op nhỏ thật trên `cuda`, lỗi thì tự fallback `cpu`. Tự thích ứng máy khác (RTX 5090, v.v.) mà không cần sửa code |
+
+**Frame-skip detection (đòn bẩy lớn nhất, 16fps → 58.5fps):** `main.py`/`webrtc_stream.py` chỉ
+chạy YOLO thật mỗi `_DETECT_INTERVAL=2` frame; frame giữa ngoại suy bbox bằng vận tốc Kalman
+nội bộ của ByteTrack (`tracking.predicted_velocity`, hàm có sẵn, không đổi signature).
+Đánh đổi: vị trí ở frame ngoại suy là ước lượng tuyến tính, sai số tăng nếu vật thể đổi hướng
+đột ngột giữa 2 lần detect thật — chấp nhận được vì interval nhỏ (tối đa 1 frame nội suy).
+
+**Đóng gói thành app Windows (Electron):** thư mục `electron/` mới — `main.js` tự spawn
+`python -m uvicorn src.api:app` làm backend, mở cửa sổ desktop load `http://127.0.0.1:8000`
+(FastAPI giờ tự serve luôn `dashboard/dist` đã build qua `StaticFiles`, gộp 1 process thay vì
+2). Build ra installer thật (`npm run dist` trong `electron/`) →
+`electron/dist_installer/App Add-in Setup 1.0.0.exe` (~78MB, NSIS) — đã cài thử bằng `/S`
+(silent) vào `C:\Program Files\App Add-in\`, có Start Menu shortcut, chạy đúng từ vị trí cài
+thật (không phải bản portable). Cần bật Windows Developer Mode 1 lần trên máy dev để build
+NSIS (electron-builder cần quyền tạo symbolic link khi giải nén tool ký code).
+
+**Giới hạn cố ý (ponytail) — cần biết trước khi dùng thật:**
+- Backend vẫn cần Python + toàn bộ dependency (`torch`, `ultralytics`, `insightface`,
+  `mediapipe`, `easyocr`...) cài sẵn trên máy chạy app — **không phải installer
+  dependency-free** (Electron chỉ spawn Python có sẵn, không bundle Python runtime). Muốn
+  chạy trên máy sạch không có Python phải đóng gói kiểu khác (PyInstaller, nặng hơn nhiều,
+  chưa làm vì user chỉ chọn hướng Electron).
+- Đóng cửa sổ bình thường (nút X / quit) → backend tự tắt sạch (`stopBackend()` đã code).
+  Nhưng **force-kill qua Task Manager** có thể để lại process Python mồ côi (Windows không tự
+  tie lifetime process con vào process cha như POSIX) — gặp đúng trường hợp này lúc test, phải
+  tắt tay. Fix triệt để cần Windows Job Object, chưa làm.
+- GPU: chỉ auto-detect CUDA→CPU (NVIDIA). Chưa làm DirectML cho AMD/đa nền tảng — user chưa
+  có phần cứng AMD thật để test, cố ý hoãn tới khi có máy thật thay vì ship code không kiểm
+  chứng được.
+- `data/tracking.db` hiện có nhiều dữ liệu test/benchmark (`bench_cam`, `bench_realtime*`,
+  `perf_probe*`, nhiều accident event giả do threshold dễ trigger lúc test lặp) — user đã xác
+  nhận **không cần xoá**, để nguyên.

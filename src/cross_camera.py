@@ -9,6 +9,14 @@ from .models import Track, Frame
 # Khi calibration.set_calibration, world_points phải theo đúng quy ước này.
 _position_history: dict[tuple[str, int], deque[tuple[float, float]]] = {}
 
+# extract_face_embedding (InsightFace) là bước tốn nhất trong pipeline (~165ms/lần đo thực
+# tế trên CPU) -> chỉ THỬ gọi lại mỗi N frame/track (kể cả khi lần thử trước không thấy mặt
+# -> không retry mỗi frame), các frame giữa dùng lại person_id+embedding đã ghép lần gần nhất.
+# Đổi lại: nếu mặt chỉ thoáng qua giữa 2 lần thử, có thể bỏ lỡ tối đa N-1 frame.
+_FACE_EMBED_INTERVAL = 5
+_frame_counters: dict[tuple[str, int], int] = {}
+_last_identity: dict[tuple[str, int], tuple[int, list[float]]] = {}  # key -> (person_id, embedding)
+
 
 def _track_center(track: Track) -> tuple[float, float]:
     x, y, w, h = track.bbox
@@ -53,14 +61,23 @@ def resolve_global_identity(track: Track, frame: Frame) -> int | None:
     """Ghép 1 track người với global person_id xuyên camera (face embedding), kèm
     world_pos + travel_bearing_deg (ưu tiên Kalman, fallback history thô) nếu camera
     đã calibrate."""
-    embedding = features.extract_face_embedding(track, frame)
-    if embedding is None:
-        return None
-    track.embedding = embedding  # tránh gọi extract_face_embedding lại lần 2 ở nơi khác
+    key = (track.camera_id, track.track_id)
+    count = _frame_counters.get(key, 0)
+    _frame_counters[key] = count + 1
 
-    person_id = reid.match_person(embedding)
-    if person_id is None:
-        person_id = reid.register_person(embedding)
+    if count % _FACE_EMBED_INTERVAL == 0:
+        embedding = features.extract_face_embedding(track, frame)
+        if embedding is not None:
+            track.embedding = embedding  # tránh gọi extract_face_embedding lại lần 2 ở nơi khác
+            person_id = reid.match_person(embedding)
+            if person_id is None:
+                person_id = reid.register_person(embedding)
+            _last_identity[key] = (person_id, embedding)
+
+    if key not in _last_identity:
+        return None  # chưa từng ghép được person_id (chưa thấy mặt lần nào) -> chưa có gì để trả
+
+    person_id, track.embedding = _last_identity[key]
 
     try:
         track.world_pos = calibration.pixel_to_world(track.camera_id, *_track_center(track))

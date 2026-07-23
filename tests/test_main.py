@@ -73,21 +73,25 @@ def test_handle_departure_calls_person_search_with_departed_track():
     mock_search.assert_called_once_with(departed)
 
 
-def test_run_camera_searches_nearby_cameras_when_person_departs():
-    frame1 = Frame(camera_id="cam_depart_test", timestamp=1.0, image=np.zeros((10, 10, 3), dtype=np.uint8))
-    frame2 = Frame(camera_id="cam_depart_test", timestamp=2.0, image=np.zeros((10, 10, 3), dtype=np.uint8))
-    person_track = Track(track_id=1, camera_id="cam_depart_test", bbox=(0, 0, 10, 10), class_id="person")
+def test_run_camera_searches_nearby_cameras_when_departed_track_already_has_person_id():
+    """resolve_global_identity giờ chỉ chạy trong _handle_accident (không còn mỗi frame)
+    -> person_search khi rời khung hình chỉ hoạt động cho track đã có person_id sẵn
+    (vd: đã từng dính tai nạn trước đó). _DETECT_INTERVAL=2 -> cần 3 frame (frame_count
+    0,1,2) để có đủ 2 lần detect thật (0 và 2), departed_tracks chỉ được check ở frame detect."""
+    frames = [
+        Frame(camera_id="cam_depart_test", timestamp=float(i), image=np.zeros((10, 10, 3), dtype=np.uint8))
+        for i in range(3)
+    ]
+    person_track = Track(
+        track_id=1, camera_id="cam_depart_test", bbox=(0, 0, 10, 10), class_id="person", person_id=55
+    )
 
     with (
         patch("src.main.ingest.register_camera_source"),
-        patch("src.main.ingest.read_frame", side_effect=[frame1, frame2, None]),
+        patch("src.main.ingest.read_frame", side_effect=[*frames, None]),
         patch("src.main.detection.detect_objects", return_value=[]),
         patch("src.main.tracking.update_tracks", side_effect=[[person_track], []]),
         patch("src.main.detection.detect_accident", return_value=False),
-        patch(
-            "src.main.cross_camera.resolve_global_identity",
-            side_effect=lambda t, f: setattr(t, "person_id", 55),
-        ),
         patch("src.main.storage.save_track"),
         patch("src.main.person_search.search_departed_person", return_value=[]) as mock_search,
     ):
@@ -96,9 +100,62 @@ def test_run_camera_searches_nearby_cameras_when_person_departs():
     mock_search.assert_called_once_with(person_track)
 
 
+def test_run_camera_does_not_search_when_person_never_resolved():
+    """Không tai nạn -> resolve_global_identity không chạy -> person_id vẫn None khi
+    track rời khung hình -> không gọi person_search. 3 frame để có đủ 2 lần detect thật
+    (frame_count 0 và 2, xem test phía trên)."""
+    frames = [
+        Frame(camera_id="cam_no_resolve", timestamp=float(i), image=np.zeros((10, 10, 3), dtype=np.uint8))
+        for i in range(3)
+    ]
+    person_track = Track(track_id=1, camera_id="cam_no_resolve", bbox=(0, 0, 10, 10), class_id="person")
+
+    with (
+        patch("src.main.ingest.register_camera_source"),
+        patch("src.main.ingest.read_frame", side_effect=[*frames, None]),
+        patch("src.main.detection.detect_objects", return_value=[]),
+        patch("src.main.tracking.update_tracks", side_effect=[[person_track], []]),
+        patch("src.main.detection.detect_accident", return_value=False),
+        patch("src.main.storage.save_track"),
+        patch("src.main.person_search.search_departed_person", return_value=[]) as mock_search,
+    ):
+        run_camera("cam_no_resolve", "dummy_source")
+
+    mock_search.assert_not_called()
+
+
+def test_run_camera_skips_detect_and_extrapolates_bbox_using_kalman_velocity():
+    """_DETECT_INTERVAL=2 -> detect_objects chỉ gọi ở frame_count=0 (detect thật),
+    frame_count=1 bị skip và dùng tracking.predicted_velocity để dịch bbox thay vì detect lại."""
+    frames = [
+        Frame(camera_id="cam_skip_test", timestamp=float(i), image=np.zeros((10, 10, 3), dtype=np.uint8))
+        for i in range(2)
+    ]
+    track = Track(track_id=1, camera_id="cam_skip_test", bbox=(100.0, 100.0, 20, 20), class_id="car")
+
+    with (
+        patch("src.main.ingest.register_camera_source"),
+        patch("src.main.ingest.read_frame", side_effect=[*frames, None]),
+        patch("src.main.detection.detect_objects", return_value=[]) as mock_detect,
+        patch("src.main.tracking.update_tracks", return_value=[track]) as mock_update,
+        patch("src.main.tracking.predicted_velocity", return_value=(10.0, 0.0)),
+        patch("src.main.detection.detect_accident", return_value=False),
+        patch("src.main.storage.save_track") as mock_save,
+    ):
+        run_camera("cam_skip_test", "dummy_source")
+
+    mock_detect.assert_called_once()
+    mock_update.assert_called_once()
+    saved_bboxes = [call.args[0].bbox for call in mock_save.call_args_list]
+    assert saved_bboxes[0] == (100.0, 100.0, 20, 20)  # frame detect thật
+    assert saved_bboxes[1] == (105.0, 100.0, 20, 20)  # frame ngoại suy: step_fraction=0.5, vx=10 -> +5
+
+
 if __name__ == "__main__":
     test_run_camera_extracts_and_saves_event_on_accident()
     test_run_camera_skips_feature_extraction_without_accident()
     test_handle_departure_calls_person_search_with_departed_track()
-    test_run_camera_searches_nearby_cameras_when_person_departs()
+    test_run_camera_searches_nearby_cameras_when_departed_track_already_has_person_id()
+    test_run_camera_does_not_search_when_person_never_resolved()
+    test_run_camera_skips_detect_and_extrapolates_bbox_using_kalman_velocity()
     print("OK")

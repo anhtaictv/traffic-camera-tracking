@@ -1,12 +1,16 @@
 import asyncio
 import json
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import camera_registry, storage, webrtc_stream
 from .storage import _get_connection
+
+_DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
 
 app = FastAPI()
 # ponytail: CORS mở toàn bộ để dashboard dev (Vite) gọi được -> siết lại origin cụ thể
@@ -57,14 +61,11 @@ def _event_row_to_dict(row: tuple) -> dict:
 def list_tracks(limit: int = 200) -> list[dict]:
     """Danh sách track gần nhất có world_pos (để vẽ lên map)."""
     conn = _get_connection()
-    try:
-        rows = conn.execute(
-            "SELECT track_id, camera_id, world_x, world_y FROM suspect_tracks "
-            "WHERE world_x IS NOT NULL ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT track_id, camera_id, world_x, world_y FROM suspect_tracks "
+        "WHERE world_x IS NOT NULL ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
     return [{"track_id": r[0], "camera_id": r[1], "world_x": r[2], "world_y": r[3]} for r in rows]
 
 
@@ -72,13 +73,10 @@ def list_tracks(limit: int = 200) -> list[dict]:
 def list_events(limit: int = 50) -> list[dict]:
     """Danh sách accident event gần nhất."""
     conn = _get_connection()
-    try:
-        rows = conn.execute(
-            f"SELECT {_EVENT_COLUMNS} FROM accident_events ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = conn.execute(
+        f"SELECT {_EVENT_COLUMNS} FROM accident_events ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
     return [_event_row_to_dict(r) for r in rows]
 
 
@@ -124,7 +122,6 @@ async def stream_events(websocket: WebSocket) -> None:
     await websocket.accept()
     conn = _get_connection()
     last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM accident_events").fetchone()[0]
-    conn.close()
 
     try:
         while True:
@@ -133,7 +130,6 @@ async def stream_events(websocket: WebSocket) -> None:
                 f"SELECT {_EVENT_COLUMNS} FROM accident_events WHERE id > ? ORDER BY id",
                 (last_id,),
             ).fetchall()
-            conn.close()
 
             for row in rows:
                 last_id = row[0]
@@ -142,3 +138,11 @@ async def stream_events(websocket: WebSocket) -> None:
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
         pass
+
+
+# serve dashboard đã build (npm run build trong dashboard/) -> gộp 1 process duy nhất cho
+# Electron quản lý, thay vì phải chạy song song vite dev server. Mount sau cùng để không
+# che các route /api, /webrtc, /ws phía trên. Bỏ qua nếu chưa build (dev thường vẫn dùng
+# vite dev server riêng, dashboard/dist không tồn tại).
+if _DASHBOARD_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=_DASHBOARD_DIST, html=True), name="dashboard")
